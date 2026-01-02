@@ -19,6 +19,8 @@ from fpdf import FPDF
 DB_PATH = "db/loterias.db"
 
 # ================= ESTADOS =================
+SESSION_TIMEOUT = 300  # 5 minutos (em segundos)
+
 APRESENTACAO = "APRESENTACAO"
 CIENCIA_RISCO = "CIENCIA_RISCO"
 ESCOLHER_PLANO = "ESCOLHER_PLANO"
@@ -34,30 +36,98 @@ ORCAMENTO = "ORCAMENTO"
 CONFIRMAR_ORCAMENTO = "CONFIRMAR_ORCAMENTO"
 OPCOES_JOGOS = "OPCOES_JOGOS"
 
-# ================= DADOS USUÁRIOS =================
+
+async def callback_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+
+    # Sempre responder o callback para evitar "loading infinito"
+    await query.answer(
+        "⚠️ Esta ação pertence a uma sessão antiga.\n"
+        "Use /start para continuar.",
+        show_alert=True
+    )
+
+
+
+
+def marcar_atividade(context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["_ultima_atividade"] = time.time()
+
+
+def sessao_expirada(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    ultima = context.user_data.get("_ultima_atividade")
+    if not ultima:
+        return False
+    return (time.time() - ultima) > SESSION_TIMEOUT
+
+async def tratar_sessao_expirada(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+
+    texto = (
+        "⏱️ Sua sessão expirou por inatividade.\n\n"
+        "Voltando ao menu principal."
+    )
+
+    if update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(texto)
+    elif update.message:
+        await update.message.reply_text(texto)
+
+    return await menu_loterias(update, context)
+
+
+
 
 def garantir_usuario(telegram_id: int, nome: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
     cursor.execute("""
-        INSERT OR IGNORE INTO usuarios (telegram_id, nome)
-        VALUES (?, ?)
+        INSERT OR IGNORE INTO usuarios (telegram_id, nome, status)
+        VALUES (?, ?, 'pendente')
     """, (telegram_id, nome))
 
     conn.commit()
     conn.close()
 
 
+
 # --- START ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    telegram_id = user.id
 
-    # 🔐 GARANTE QUE O USUÁRIO EXISTE NO BANCO
     garantir_usuario(
-        telegram_id=user.id,
+        telegram_id=telegram_id,
         nome=user.full_name
     )
+
+    context.user_data.clear()
+    marcar_atividade(context)
+
+    if usuario_tem_acesso(telegram_id):
+        texto = (
+            "🎯 *Super Bot FecLoterias*\n\n"
+            "Bem-vindo de volta! ✅\n"
+            "Seu acesso está ativo.\n\n"
+            "Escolha a loteria para continuar:"
+        )
+
+        keyboard = [[
+            InlineKeyboardButton("Lotofácil", callback_data="lotofacil"),
+            InlineKeyboardButton("Mega-Sena", callback_data="megasena")
+        ]]
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        if update.message:
+            await update.message.reply_text(texto, reply_markup=reply_markup, parse_mode="Markdown")
+        else:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(texto, reply_markup=reply_markup, parse_mode="Markdown")
+
+        return ESCOLHER_LOTERIA
 
     texto = (
         "🎯 *Super Bot FecLoterias*\n\n"
@@ -68,24 +138,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     keyboard = [[InlineKeyboardButton("Continuar", callback_data="continuar")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if update.message:
-        await update.message.reply_text(
-            texto,
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
-
-    elif update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.reply_text(
-            texto,
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
+    await update.message.reply_text(
+        texto,
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
 
     return APRESENTACAO
+
+
 
 
 def usuario_tem_acesso(telegram_id: int) -> bool:
@@ -106,19 +168,22 @@ def usuario_tem_acesso(telegram_id: int) -> bool:
 
     acesso_fim, status = row
 
+    # ❌ precisa estar ativo
     if status != "ativo":
         return False
 
-    if acesso_fim:
-        try:
-            if datetime.now() > datetime.fromisoformat(acesso_fim):
-                return False
-        except ValueError:
+    # ❌ acesso_fim obrigatório
+    if not acesso_fim:
+        return False
+
+    try:
+        if datetime.now() > datetime.fromisoformat(acesso_fim):
             return False
+    except ValueError:
+        return False
 
     return True
-
-
+    
 # ================= CIÊNCIA DE RISCO =================
 async def ciencia_risco(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -335,13 +400,17 @@ async def menu_loterias(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def escolher_loteria(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if sessao_expirada(context):
+        return await tratar_sessao_expirada(update, context)
+
+    marcar_atividade(context)
+
     query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
     loteria = query.data
 
-    # 🔐 valida acesso NO BANCO
     if not usuario_tem_acesso(user_id):
         await query.message.reply_text(
             "🔒 Seu acesso não está ativo ou expirou.\n\n"
@@ -349,9 +418,9 @@ async def escolher_loteria(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ConversationHandler.END
 
-    # 🧠 salva apenas estado da conversa
-    context.user_data.clear
+    context.user_data.clear()
     context.user_data["loteria"] = loteria
+    marcar_atividade(context)
 
     keyboard = [
         [
@@ -369,17 +438,19 @@ async def escolher_loteria(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ESCOLHER_BASE
 
 
+
 # --- ESCOLHER BASE ---
 async def escolher_base(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     user_id = query.from_user.id
+    # context.user_data.clear()
     loteria = context.user_data.get("loteria")
 
     if not loteria:
-        await query.message.reply_text("Fluxo inválido. Use /start.")
-        return ConversationHandler.END
+        return await menu_loterias(update, context)
+
 
     if query.data == "manual":
         dezenas = list(range(1, 26)) if loteria == "lotofacil" else list(range(1, 61))
@@ -965,7 +1036,7 @@ if __name__ == "__main__":
         states={
             APRESENTACAO: [CallbackQueryHandler(ciencia_risco, pattern="continuar")],
             CIENCIA_RISCO: [CallbackQueryHandler(escolher_plano, pattern="concordo")],
-            ESCOLHER_PLANO: [CallbackQueryHandler(gerar_pix, pattern="plano_mensal")],
+            ESCOLHER_PLANO: [CallbackQueryHandler(gerar_pix, pattern="plano_")],
             AGUARDAR_PAGAMENTO: [CallbackQueryHandler(confirmar_pagamento, pattern="pago")],
 
             ESCOLHER_LOTERIA: [CallbackQueryHandler(escolher_loteria)],
@@ -980,6 +1051,12 @@ if __name__ == "__main__":
         fallbacks=[]
     )
 
+    # 1️⃣ registra o ConversationHandler
     app.add_handler(conv_handler)
+
+    # 2️⃣ fallback global para callbacks órfãos (NÍVEL 2)
+    app.add_handler(CallbackQueryHandler(callback_fallback))
+
     print("🤖 Bot rodando...")
     app.run_polling()
+

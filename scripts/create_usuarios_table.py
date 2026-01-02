@@ -21,7 +21,9 @@ def criar_tabela_usuarios():
             pix_codigo TEXT,
             acesso_inicio DATETIME,
             acesso_fim DATETIME,
-            status TEXT DEFAULT 'ativo',
+            status TEXT DEFAULT 'pendente',
+            estado TEXT,
+            estado_atualizado_em DATETIME,
             criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (plano_codigo) REFERENCES planos(codigo)
         );
