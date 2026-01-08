@@ -24,6 +24,9 @@ def criar_tabela_usuarios():
             status TEXT DEFAULT 'pendente',
             estado TEXT,
             estado_atualizado_em DATETIME,
+            plano_tipo TEXT,
+            plano_pre INTEGER DEFAULT 0,
+            creditos INTEGER default 0,
             criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (plano_codigo) REFERENCES planos(codigo)
         );

@@ -6,4 +6,4 @@ TELEGRAM_TOKEN = "8550762817:AAFtu7E26aPpGOARtoLuAupPfTnBYZ7iGnc"
 DB_PATH = "db/loterias.db"
 
 # Limites padrão (podemos mudar depois)
-MAX_JOGOS = 50
+# MAX_JOGOS = 50
