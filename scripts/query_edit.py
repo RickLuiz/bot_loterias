@@ -7,7 +7,7 @@ conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
 cursor.execute("""
-               drop table usuarios;
+               delete from usuarios where id = 17
                
                """)
 

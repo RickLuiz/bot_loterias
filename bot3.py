@@ -14,6 +14,10 @@ from core.fechamento_megasena import  gerar_fechamento as gerar_fechamento_megas
 from core.backtest_lotofacil import rodar_backtest
 from core.backtest_megasena import rodar_backtest as rodar_backtest_megasena
 from fpdf import FPDF
+import mercadopago
+from config import MP_ACCESS_TOKEN
+sdk = mercadopago.SDK(MP_ACCESS_TOKEN)
+
 
 
 DB_PATH = "db/loterias.db"
@@ -272,54 +276,78 @@ async def gerar_pix(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    user_id = query.from_user.id
+    user = query.from_user
+    user_id = user.id
     codigo_plano = query.data.replace("plano_", "")
 
-    # 🔹 gera um código PIX temporário
-    pix_code = f"PIX-{codigo_plano.upper()}-{int(time.time())}"
-
-    agora = datetime.now().isoformat()
-
+    # 🔎 busca valor do plano
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    cursor.execute(
+        "SELECT valor FROM planos WHERE codigo = ? AND ativo = 1",
+        (codigo_plano,)
+    )
+    row = cursor.fetchone()
+    conn.close()
 
-    # 🔹 garante que o usuário exista
-    cursor.execute("""
-        INSERT OR IGNORE INTO usuarios (telegram_id, status)
-        VALUES (?, 'pendente')
-    """, (user_id,))
+    if not row:
+        await query.message.reply_text("❌ Plano inválido.")
+        return ConversationHandler.END
 
-    # 🔹 vincula plano + PIX (ainda sem liberar acesso)
+    valor = float(row[0])
+
+    # ===============================
+    # 💳 CRIA COBRANÇA PIX REAL
+    # ===============================
+    payment_data = {
+        "transaction_amount": valor,
+        "description": f"Plano {codigo_plano}",
+        "payment_method_id": "pix",
+        "payer": {
+            "email": f"user{user_id}@telegram.com",
+            "first_name": user.first_name or "Cliente"
+        },
+        "external_reference": f"{user_id}|{codigo_plano}"
+    }
+
+    result = sdk.payment().create(payment_data)
+    payment = result["response"]
+
+    pix_code = payment["point_of_interaction"]["transaction_data"]["qr_code"]
+    pix_qr = payment["point_of_interaction"]["transaction_data"]["qr_code_base64"]
+    payment_id = payment["id"]
+
+    # ===============================
+    # 💾 SALVA NO BANCO
+    # ===============================
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     cursor.execute("""
         UPDATE usuarios
         SET plano_codigo = ?,
             pix_codigo = ?,
-            status = 'pendente',
-            acesso_inicio = NULL,
-            acesso_fim = NULL
+            pix_payment_id = ?,
+            status = 'pendente'
         WHERE telegram_id = ?
-    """, (codigo_plano, pix_code, user_id))
-
+    """, (codigo_plano, pix_code, payment_id, user_id))
     conn.commit()
     conn.close()
 
-    # 🔹 teclado com botão "Já paguei"
-    keyboard = [
-        [InlineKeyboardButton("✅ Já paguei", callback_data="pago")]
-    ]
-
+    # ===============================
+    # 📲 ENVIA PIX (SEM BOTÃO!)
+    # ===============================
     await query.message.reply_text(
-        f"💸 *Pagamento via PIX*\n\n"
-        f"Plano escolhido: `{codigo_plano}`\n"
-        f"Código PIX (teste):\n"
+        "💸 *Pagamento via PIX*\n\n"
+        f"Plano: *{codigo_plano}*\n"
+        f"Valor: *R$ {valor:.2f}*\n\n"
+        "📌 Copie o código abaixo ou pague pelo QR Code.\n\n"
         f"`{pix_code}`\n\n"
-        "Após pagar, clique em *Já paguei*",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        "⏳ Assim que o pagamento for confirmado, "
+        "o acesso será liberado automaticamente.",
         parse_mode="Markdown"
     )
 
     return AGUARDAR_PAGAMENTO
-
 
 # ================= CONFIRMA PAGAMENTO =================
 
@@ -1449,10 +1477,6 @@ async def opcoes_jogos(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await menu_loterias(update, context)
 
 
-
-
-
-
 # --- CANCEL ---
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Operação cancelada.")
@@ -1475,10 +1499,7 @@ if __name__ == "__main__":
                 CallbackQueryHandler(escolher_plano, pattern="concordo"),
                 CallbackQueryHandler(cancelar_ciencia_risco, pattern="cancelar"),
             ],
-
             ESCOLHER_PLANO: [CallbackQueryHandler(gerar_pix, pattern="plano_")],
-            AGUARDAR_PAGAMENTO: [CallbackQueryHandler(confirmar_pagamento, pattern="pago")],
-
             ESCOLHER_LOTERIA: [CallbackQueryHandler(escolher_loteria)],
             ESCOLHER_BASE: [CallbackQueryHandler(escolher_base)],
             BASE_MANUAL: [CallbackQueryHandler(base_manual)],
